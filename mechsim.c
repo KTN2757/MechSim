@@ -110,31 +110,12 @@ void cleanup_processes(int sig) {
     exit(0);
 }
 
-// Function to check if sudo credentials are cached
-int check_sudo_cached() {
-    int status = system("sudo -n true 2>/dev/null");
-    return WEXITSTATUS(status) == 0;
-}
-
-// Function to prompt for sudo password if needed
-int ensure_sudo_access() {
-    if (check_sudo_cached()) {
-        return 1; // Already have sudo access
-    }
-    
-    printf("This program requires sudo access to monitor keyboard events.\n");
-    printf("Please enter your password when prompted:\n");
-    
-    int status = system("sudo -v");
-    if (WEXITSTATUS(status) != 0) {
-        fprintf(stderr, "Error: Failed to obtain sudo access\n");
-        return 0;
-    }
-    
-    return 1;
-}
-
 int main(int argc, char *argv[]) {
+    if (geteuid() != 0) {
+        fprintf(stderr, "Error: mechsim must be run as root. Try: sudo mechsim\n");
+        return 1;
+    }
+
     char *sound_name = "eg-oreo"; // Default sound pack
     int verbose = 0;
     int list_sounds = 0;
@@ -184,11 +165,6 @@ int main(int argc, char *argv[]) {
     
     // Validate sound pack
     if (!validate_sound_pack(sound_name)) {
-        return 1;
-    }
-    
-    // Ensure sudo access BEFORE forking
-    if (!ensure_sudo_access()) {
         return 1;
     }
     
@@ -252,7 +228,16 @@ int main(int argc, char *argv[]) {
         // Redirect stdin from pipe
         dup2(pipefd[0], STDIN_FILENO);
         close(pipefd[0]);
-        
+
+        // Point PulseAudio at the invoking user's socket
+        const char *sudo_uid = getenv("SUDO_UID");
+        if (sudo_uid) {
+            char pulse_socket[256];
+            snprintf(pulse_socket, sizeof(pulse_socket),
+                    "unix:/run/user/%s/pulse/native", sudo_uid);
+            setenv("PULSE_SERVER", pulse_socket, 1);
+        }
+
         // Change to sound directory (so relative paths work)
         if (chdir(sound_dir) != 0) {
             perror("chdir");
@@ -290,10 +275,8 @@ int main(int argc, char *argv[]) {
             fprintf(stderr, "Starting keyboard listener...\n");
         }
 
-        // Use -n flag to prevent sudo from prompting again (credentials should be cached)
-        char sudo_path[256];
-        snprintf(sudo_path, sizeof(sudo_path), "%s/bin/sudo", PACKAGE_PREFIX);
-        execl(sudo_path, "sudo", "-n", get_key_presses_path, (char *)NULL);
+        // Directly running the get_key_presses command instead of previous sudo -n stuff
+        execl(get_key_presses_path, "get_key_presses", (char *)NULL);
         perror("execl get_key_presses");
         exit(1);
     }
